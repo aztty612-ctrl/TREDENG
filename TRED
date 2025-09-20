@@ -1,0 +1,613 @@
+npx create-react-app financial-analysis-tool
+cd financial-analysis-tool
+npm install axios chart.js
+import React, { useState, useEffect, useRef } from 'react';
+import axios from 'axios';
+import Chart from 'chart.js/auto';
+import './App.css';
+
+function App() {
+  const [symbol, setSymbol] = useState('AAPL');
+  const [timeRange, setTimeRange] = useState('1d');
+  const [chartData, setChartData] = useState(null);
+  const [chart, setChart] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [indicators, setIndicators] = useState({
+    sma: true,
+    ema: false,
+    rsi: false,
+    macd: false,
+    volume: true
+  });
+  
+  const chartRef = useRef(null);
+  const rsiChartRef = useRef(null);
+  const macdChartRef = useRef(null);
+  
+  const stocks = [
+    { symbol: 'AAPL', name: 'Apple Inc.' },
+    { symbol: 'MSFT', name: 'Microsoft Corp.' },
+    { symbol: 'GOOGL', name: 'Alphabet Inc.' },
+    { symbol: 'AMZN', name: 'Amazon.com Inc.' },
+    { symbol: 'TSLA', name: 'Tesla Inc.' },
+    { symbol: 'META', name: 'Meta Platforms Inc.' },
+    { symbol: 'NVDA', name: 'NVIDIA Corp.' },
+    { symbol: 'JPM', name: 'JPMorgan Chase & Co.' },
+    { symbol: 'BTC-USD', name: 'Bitcoin USD' },
+    { symbol: 'ETH-USD', name: 'Ethereum USD' }
+  ];
+
+  const fetchYahooFinanceData = async (symbol, range) => {
+    try {
+      let period1, period2;
+      const now = new Date();
+      
+      switch(range) {
+        case '1d':
+          period1 = Math.floor(now.setDate(now.getDate() - 1) / 1000);
+          period2 = Math.floor(new Date() / 1000);
+          break;
+        case '1w':
+          period1 = Math.floor(now.setDate(now.getDate() - 7) / 1000);
+          period2 = Math.floor(new Date() / 1000);
+          break;
+        case '1m':
+          period1 = Math.floor(now.setMonth(now.getMonth() - 1) / 1000);
+          period2 = Math.floor(new Date() / 1000);
+          break;
+        case '3m':
+          period1 = Math.floor(now.setMonth(now.getMonth() - 3) / 1000);
+          period2 = Math.floor(new Date() / 1000);
+          break;
+        case '1y':
+          period1 = Math.floor(now.setFullYear(now.getFullYear() - 1) / 1000);
+          period2 = Math.floor(new Date() / 1000);
+          break;
+        default:
+          period1 = Math.floor(now.setMonth(now.getMonth() - 1) / 1000);
+          period2 = Math.floor(new Date() / 1000);
+      }
+      
+      const response = await axios.get(
+        `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?period1=${period1}&period2=${period2}&interval=1d`
+      );
+      
+      const result = response.data.chart.result[0];
+      const timestamps = result.timestamp;
+      const quotes = result.indicators.quote[0];
+      
+      const data = timestamps.map((timestamp, index) => ({
+        date: new Date(timestamp * 1000).toISOString().split('T')[0],
+        open: quotes.open[index],
+        high: quotes.high[index],
+        low: quotes.low[index],
+        close: quotes.close[index],
+        volume: quotes.volume[index]
+      })).filter(item => item.close !== null);
+      
+      return data;
+    } catch (error) {
+      throw new Error('فشل في جلب البيانات من Yahoo Finance');
+    }
+  };
+
+  const fetchAlphaVantageData = async (symbol) => {
+    try {
+      const response = await axios.get(
+        `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=${symbol}&outputsize=full&apikey=${process.env.REACT_APP_ALPHA_VANTAGE_API_KEY}`
+      );
+      
+      const data = response.data['Time Series (Daily)'];
+      
+      const formattedData = Object.keys(data).map(date => ({
+        date,
+        open: parseFloat(data[date]['1. open']),
+        high: parseFloat(data[date]['2. high']),
+        low: parseFloat(data[date]['3. low']),
+        close: parseFloat(data[date]['4. close']),
+        volume: parseInt(data[date]['5. volume'])
+      })).reverse();
+      
+      return formattedData;
+    } catch (error) {
+      throw new Error('فشل في جلب البيانات من Alpha Vantage');
+    }
+  };
+
+  const fetchStockData = async () => {
+    setLoading(true);
+    setError(null);
+    
+    try {
+      let data;
+      
+      try {
+        data = await fetchYahooFinanceData(symbol, timeRange);
+      } catch (yahooError) {
+        console.log('Yahoo Finance failed, trying Alpha Vantage');
+        data = await fetchAlphaVantageData(symbol);
+        
+        if (timeRange !== 'max') {
+          const days = timeRange === '1d' ? 1 : 
+                      timeRange === '1w' ? 7 : 
+                      timeRange === '1m' ? 30 : 
+                      timeRange === '3m' ? 90 : 365;
+          
+          data = data.slice(-days);
+        }
+      }
+      
+      setChartData(data);
+      renderChart(data);
+    } catch (error) {
+      console.error('Error fetching stock data:', error);
+      setError(error.message || 'حدث خطأ في جلب البيانات');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const calculateIndicators = (data) => {
+    const indicators = {};
+    
+    if (indicators.sma) {
+      indicators.sma = calculateSMA(data, 20);
+    }
+    
+    if (indicators.ema) {
+      indicators.ema = calculateEMA(data, 12);
+    }
+    
+    if (indicators.rsi) {
+      indicators.rsi = calculateRSI(data, 14);
+    }
+    
+    if (indicators.macd) {
+      indicators.macd = calculateMACD(data, 12, 26, 9);
+    }
+    
+    return indicators;
+  };
+
+  const calculateSMA = (data, period) => {
+    const sma = [];
+    for (let i = period - 1; i < data.length; i++) {
+      let sum = 0;
+      for (let j = 0; j < period; j++) {
+        sum += data[i - j].close;
+      }
+      sma.push(sum / period);
+    }
+    return sma;
+  };
+
+  const calculateEMA = (data, period) => {
+    const ema = [];
+    const multiplier = 2 / (period + 1);
+    
+    let sum = 0;
+    for (let i = 0; i < period; i++) {
+      sum += data[i].close;
+    }
+    ema.push(sum / period);
+    
+    for (let i = period; i < data.length; i++) {
+      const currentEMA = (data[i].close - ema[ema.length - 1]) * multiplier + ema[ema.length - 1];
+      ema.push(currentEMA);
+    }
+    
+    return ema;
+  };
+
+  const calculateRSI = (data, period) => {
+    const rsi = [];
+    const gains = [];
+    const losses = [];
+    
+    for (let i = 1; i < data.length; i++) {
+      const change = data[i].close - data[i - 1].close;
+      gains.push(change > 0 ? change : 0);
+      losses.push(change < 0 ? Math.abs(change) : 0);
+    }
+    
+    for (let i = period - 1; i < gains.length; i++) {
+      let avgGain = 0;
+      let avgLoss = 0;
+      
+      for (let j = 0; j < period; j++) {
+        avgGain += gains[i - j];
+        avgLoss += losses[i - j];
+      }
+      
+      avgGain /= period;
+      avgLoss /= period;
+      
+      const rs = avgGain / avgLoss;
+      const rsiValue = 100 - (100 / (1 + rs));
+      rsi.push(rsiValue);
+    }
+    
+    return rsi;
+  };
+
+  const calculateMACD = (data, fastPeriod, slowPeriod, signalPeriod) => {
+    const macdLine = [];
+    const signalLine = [];
+    const histogram = [];
+    
+    const fastEMA = calculateEMA(data, fastPeriod);
+    const slowEMA = calculateEMA(data, slowPeriod);
+    
+    for (let i = 0; i < fastEMA.length; i++) {
+      macdLine.push(fastEMA[i] - slowEMA[i]);
+    }
+    
+    const signalEMA = calculateEMA(
+      macdLine.map((val, idx) => ({ close: val })),
+      signalPeriod
+    );
+    
+    for (let i = 0; i < macdLine.length; i++) {
+      signalLine.push(signalEMA[i]);
+      histogram.push(macdLine[i] - signalEMA[i]);
+    }
+    
+    return {
+      macdLine,
+      signalLine,
+      histogram
+    };
+  };
+
+  const renderChart = (data) => {
+    if (chart) {
+      chart.destroy();
+    }
+    
+    if (rsiChartRef.current && rsiChartRef.current.chart) {
+      rsiChartRef.current.chart.destroy();
+    }
+    
+    if (macdChartRef.current && macdChartRef.current.chart) {
+      macdChartRef.current.chart.destroy();
+    }
+    
+    const ctx = chartRef.current.getContext('2d');
+    
+    const calculatedIndicators = calculateIndicators(data);
+    
+    const labels = data.map(item => item.date);
+    const datasets = [
+      {
+        label: 'سعر الإغلاق',
+        data: data.map(item => item.close),
+        borderColor: 'rgb(75, 192, 192)',
+        backgroundColor: 'rgba(75, 192, 192, 0.2)',
+        tension: 0.1,
+        fill: false,
+        pointRadius: 0,
+        borderWidth: 2
+      }
+    ];
+    
+    if (indicators.sma && calculatedIndicators.sma) {
+      datasets.push({
+        label: 'SMA (20)',
+        data: [
+          ...Array(data.length - calculatedIndicators.sma.length).fill(null),
+          ...calculatedIndicators.sma
+        ],
+        borderColor: 'rgb(255, 99, 132)',
+        backgroundColor: 'rgba(255, 99, 132, 0.2)',
+        tension: 0.1,
+        fill: false,
+        pointRadius: 0,
+        borderWidth: 1.5
+      });
+    }
+    
+    if (indicators.ema && calculatedIndicators.ema) {
+      datasets.push({
+        label: 'EMA (12)',
+        data: [
+          ...Array(data.length - calculatedIndicators.ema.length).fill(null),
+          ...calculatedIndicators.ema
+        ],
+        borderColor: 'rgb(54, 162, 235)',
+        backgroundColor: 'rgba(54, 162, 235, 0.2)',
+        tension: 0.1,
+        fill: false,
+        pointRadius: 0,
+        borderWidth: 1.5
+      });
+    }
+    
+    const newChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels,
+        datasets
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: {
+            position: 'top',
+          },
+          title: {
+            display: true,
+            text: `تحليل سهم ${symbol}`
+          }
+        },
+        scales: {
+          y: {
+            beginAtZero: false
+          }
+        }
+      }
+    });
+    
+    setChart(newChart);
+    
+    if (indicators.rsi || indicators.macd) {
+      renderIndicatorCharts(data, calculatedIndicators);
+    }
+  };
+
+  const renderIndicatorCharts = (data, calculatedIndicators) => {
+    if (indicators.rsi && calculatedIndicators.rsi && rsiChartRef.current) {
+      const rsiCtx = rsiChartRef.current.getContext('2d');
+      
+      rsiChartRef.current.chart = new Chart(rsiCtx, {
+        type: 'line',
+        data: {
+          labels: data.slice(-calculatedIndicators.rsi.length).map(item => item.date),
+          datasets: [{
+            label: 'RSI (14)',
+            data: calculatedIndicators.rsi,
+            borderColor: 'rgb(153, 102, 255)',
+            backgroundColor: 'rgba(153, 102, 255, 0.2)',
+            tension: 0.1,
+            fill: false,
+            pointRadius: 0,
+            borderWidth: 1.5
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: {
+              position: 'top',
+            },
+            title: {
+              display: true,
+              text: 'مؤشر القوة النسبية (RSI)'
+            }
+          },
+          scales: {
+            y: {
+              min: 0,
+              max: 100
+            }
+          }
+        }
+      });
+    }
+    
+    if (indicators.macd && calculatedIndicators.macd && macdChartRef.current) {
+      const macdCtx = macdChartRef.current.getContext('2d');
+      
+      macdChartRef.current.chart = new Chart(macdCtx, {
+        type: 'line',
+        data: {
+          labels: data.slice(-calculatedIndicators.macd.macdLine.length).map(item => item.date),
+          datasets: [
+            {
+              label: 'MACD',
+              data: calculatedIndicators.macd.macdLine,
+              borderColor: 'rgb(75, 192, 192)',
+              backgroundColor: 'rgba(75, 192, 192, 0.2)',
+              tension: 0.1,
+              fill: false,
+              pointRadius: 0,
+              borderWidth: 1.5
+            },
+            {
+              label: 'Signal',
+              data: calculatedIndicators.macd.signalLine,
+              borderColor: 'rgb(255, 99, 132)',
+              backgroundColor: 'rgba(255, 99, 132, 0.2)',
+              tension: 0.1,
+              fill: false,
+              pointRadius: 0,
+              borderWidth: 1.5
+            },
+            {
+              label: 'Histogram',
+              data: calculatedIndicators.macd.histogram,
+              type: 'bar',
+              backgroundColor: function(context) {
+                const value = context.dataset.data[context.dataIndex];
+                return value < 0 ? 'rgba(255, 99, 132, 0.5)' : 'rgba(75, 192, 192, 0.5)';
+              },
+              borderColor: function(context) {
+                const value = context.dataset.data[context.dataIndex];
+                return value < 0 ? 'rgb(255, 99, 132)' : 'rgb(75, 192, 192)';
+              },
+              borderWidth: 1
+            }
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: {
+              position: 'top',
+            },
+            title: {
+              display: true,
+              text: 'مؤشر MACD'
+            }
+          }
+        }
+      });
+    }
+  };
+
+  const toggleIndicator = (indicator) => {
+    setIndicators(prev => ({
+      ...prev,
+      [indicator]: !prev[indicator]
+    }));
+  };
+
+  useEffect(() => {
+    fetchStockData();
+  }, [symbol, timeRange]);
+
+  useEffect(() => {
+    if (chartData) {
+      renderChart(chartData);
+    }
+  }, [indicators]);
+
+  return (
+    <div className="app">
+      <header className="app-header">
+        <h1>أداة تحليل الأسواق المالية المجانية</h1>
+        <p>تحليل فني متقدم للأسهم بدون اشتراكات</p>
+      </header>
+      
+      <div className="controls">
+        <div className="control-group">
+          <label>السهم:</label>
+          <select value={symbol} onChange={(e) => setSymbol(e.target.value)}>
+            {stocks.map(stock => (
+              <option key={stock.symbol} value={stock.symbol}>
+                {stock.symbol} - {stock.name}
+              </option>
+            ))}
+          </select>
+        </div>
+        
+        <div className="control-group">
+          <label>الفترة الزمنية:</label>
+          <select value={timeRange} onChange={(e) => setTimeRange(e.target.value)}>
+            <option value="1d">يوم واحد</option>
+            <option value="1w">أسبوع</option>
+            <option value="1m">شهر</option>
+            <option value="3m">3 أشهر</option>
+            <option value="1y">سنة</option>
+          </select>
+        </div>
+        
+        <div className="control-group">
+          <label>المؤشرات:</label>
+          <div className="indicators">
+            <label>
+              <input 
+                type="checkbox" 
+                checked={indicators.sma} 
+                onChange={() => toggleIndicator('sma')} 
+              />
+              SMA (20)
+            </label>
+            <label>
+              <input 
+                type="checkbox" 
+                checked={indicators.ema} 
+                onChange={() => toggleIndicator('ema')} 
+              />
+              EMA (12)
+            </label>
+            <label>
+              <input 
+                type="checkbox" 
+                checked={indicators.rsi} 
+                onChange={() => toggleIndicator('rsi')} 
+              />
+              RSI (14)
+            </label>
+            <label>
+              <input 
+                type="checkbox" 
+                checked={indicators.macd} 
+                onChange={() => toggleIndicator('macd')} 
+              />
+              MACD
+            </label>
+            <label>
+              <input 
+                type="checkbox" 
+                checked={indicators.volume} 
+                onChange={() => toggleIndicator('volume')} 
+              />
+              حجم التداول
+            </label>
+          </div>
+        </div>
+        
+        <button onClick={fetchStockData} disabled={loading}>
+          {loading ? 'جاري التحميل...' : 'تحديث البيانات'}
+        </button>
+      </div>
+      
+      {error && (
+        <div className="error-message">
+          {error}
+        </div>
+      )}
+      
+      <div className="chart-container">
+        <canvas ref={chartRef} id="stockChart"></canvas>
+      </div>
+      
+      {indicators.rsi && (
+        <div className="chart-container">
+          <canvas ref={rsiChartRef} id="rsiChart"></canvas>
+        </div>
+      )}
+      
+      {indicators.macd && (
+        <div className="chart-container">
+          <canvas ref={macdChartRef} id="macdChart"></canvas>
+        </div>
+      )}
+      
+      <div className="info-panel">
+        <h2>معلومات السهم</h2>
+        {chartData && chartData.length > 0 && (
+          <div className="stock-info">
+            <div className="info-item">
+              <span>آخر سعر:</span>
+              <span>${chartData[chartData.length - 1].close.toFixed(2)}</span>
+            </div>
+            <div className="info-item">
+              <span>أعلى سعر:</span>
+              <span>${Math.max(...chartData.map(d => d.high)).toFixed(2)}</span>
+            </div>
+            <div className="info-item">
+              <span>أقل سعر:</span>
+              <span>${Math.min(...chartData.map(d => d.low)).toFixed(2)}</span>
+            </div>
+            <div className="info-item">
+              <span>حجم التداول:</span>
+              <span>{chartData[chartData.length - 1].volume.toLocaleString()}</span>
+            </div>
+          </div>
+        )}
+      </div>
+      
+      <footer className="app-footer">
+        <p>أداة تحليل الأسواق المالية المجانية - جميع الحقوق محفوظة</p>
+        <p>البيانات المعروضة هي لأغراض توضيحية فقط وليست نصيحة استثمارية</p>
+      </footer>
+    </div>
+  );
+}
+
+export default App;
